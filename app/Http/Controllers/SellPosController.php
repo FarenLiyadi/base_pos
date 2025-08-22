@@ -63,8 +63,10 @@ use Stripe\Charge;
 use Stripe\Stripe;
 use Yajra\DataTables\Facades\DataTables;
 use App\Events\SellCreatedOrModified;
+use App\ProductUnitDiscount;
+use App\ProductUnitDiscountTier;
 use Illuminate\Support\Facades\Log;
-
+use Illuminate\Support\Facades\Schema;
 class SellPosController extends Controller
 {
     /**
@@ -1644,6 +1646,55 @@ class SellPosController extends Controller
 
         $sub_units = $this->productUtil->getSubUnits($business_id, $product->unit_id, false, $product->product_id);
 
+        $base_exc    = (float) $product->default_sell_price;
+$variationId = isset($variation_id) ? (int)$variation_id : null;
+$current_qty = (float) ($product->quantity_ordered ?? $quantity ?? 1);
+
+$unit_discount_map   = [];
+$unit_discount_tiers = [];
+$unit_price_map      = [];
+
+try {
+    $hasBase  = Schema::hasTable('product_unit_discounts');
+    $hasTiers = Schema::hasTable('product_unit_discount_tiers');
+
+    foreach ($sub_units as $uid => $u) {
+        // ⬇️ PENTING: pakai key 'multiplier' (bukan 'base_unit_multiplier')
+        $mult      = (float) ($u['multiplier'] ?? 1);
+        $pack_base = $base_exc * $mult;
+
+        // Diskon satuan
+        $baseDisc = $hasBase ? ProductUnitDiscount::forProductUnit($product->product_id, $variationId, (int)$uid)->first() : null;
+        $base_amt = $baseDisc ? $baseDisc->computeAmount($pack_base) : 0.0;
+
+        // Diskon tier (qty)
+        $tier       = null;
+        $tiers_meta = [];
+        if ($hasTiers) {
+            $tier = ProductUnitDiscountTier::forProductUnit($product->product_id, $variationId, (int)$uid)
+                      ->applicableToQty($current_qty)->first();
+
+            $tiers_meta = ProductUnitDiscountTier::forProductUnit($product->product_id, $variationId, (int)$uid)
+              ->get(['min_qty','discount_type','discount_value'])
+              ->map(function($tr){
+                  return ['min' => (float)$tr->min_qty, 'type' => $tr->discount_type, 'val' => (float)$tr->discount_value];
+              })->values()->all();
+        }
+
+        $tier_amt   = $tier ? $tier->computeAmount($pack_base) : 0.0;
+        $pack_price = max(0.0, $pack_base - $base_amt - $tier_amt);
+
+        $unit_discount_map[$uid]   = $baseDisc ? ['type'=>$baseDisc->discount_type,'value'=>(float)$baseDisc->discount_value] : null;
+        $unit_discount_tiers[$uid] = $tiers_meta;
+        $unit_price_map[$uid]      = $pack_price;
+    }
+} catch (\Throwable $e) {
+    \Log::warning('Build unit discounts failed: '.$e->getMessage());
+    $unit_discount_map = $unit_discount_tiers = $unit_price_map = [];
+}
+        
+
+
         //Get customer group and change the price accordingly
         $customer_id = request()->get('customer_id', null);
         $cg = $this->contactUtil->getCustomerGroup($business_id, $customer_id);
@@ -1711,9 +1762,12 @@ class SellPosController extends Controller
                 $edit_price = auth()->user()->can('edit_product_price_from_pos_screen');
             }
 
-            $output['html_content'] = view('sale_pos.product_row')
-                ->with(compact('product', 'row_count', 'tax_dropdown', 'enabled_modules', 'pos_settings', 'sub_units', 'discount', 'waiters', 'edit_discount', 'edit_price', 'purchase_line_id', 'warranties', 'quantity', 'is_direct_sell', 'so_line', 'is_sales_order', 'last_sell_line', 'is_serial_no'))
-                ->render();
+           $output['html_content'] = view('sale_pos.product_row')->with(compact(
+  'product','row_count','tax_dropdown','enabled_modules','pos_settings','sub_units',
+  'discount','waiters','edit_discount','edit_price','purchase_line_id','warranties',
+  'quantity','is_direct_sell','so_line','is_sales_order','last_sell_line','is_serial_no',
+  'unit_discount_map','unit_discount_tiers','unit_price_map' // ⬅️ WAJIB ADA
+))->render();
         }
 
         return $output;
@@ -1795,7 +1849,8 @@ class SellPosController extends Controller
             \Log::emergency('File:' . $e->getFile() . 'Line:' . $e->getLine() . 'Message:' . $e->getMessage());
 
             $output['success'] = false;
-            $output['msg'] = __('lang_v1.item_out_of_stock');
+            // $output['msg'] = __('lang_v1.item_out_of_stock');
+            $output['msg'] = 'ERR: '.$e->getMessage().' @ '.$e->getFile().':'.$e->getLine();
         }
 
         return $output;

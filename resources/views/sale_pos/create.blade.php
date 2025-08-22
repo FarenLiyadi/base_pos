@@ -109,6 +109,150 @@
 @stop
 @section('javascript')
     <script src="{{ asset('js/pos.js?v=' . $asset_v) }}"></script>
+    <script>
+        (function($) {
+        function num(v, d = 0) {
+            if (v === undefined || v === null || v === '') return d;
+            if (typeof v === 'string') v = v.replace(/[^\d.-]/g, '');
+            v = parseFloat(v);
+            return isNaN(v) ? d : v;
+        }
+
+        function computePackPrice($opt, qty) {
+            const mult = num($opt.attr('data-multiplier'), 1) || 1;
+            const baseExc = num($opt.attr('data-base-unit-price'), 0);
+            const packBase = baseExc * mult;
+
+            const baseType = String($opt.attr('data-base-disc-type') || 'fixed').toLowerCase();
+            const baseVal = num($opt.attr('data-base-disc-val'), 0);
+            const baseAmt = baseType === 'percent' ? (packBase * baseVal / 100) : baseVal;
+
+            let tiers = [];
+            try {
+            tiers = JSON.parse($opt.attr('data-tiers') || '[]');
+            } catch (e) {
+            tiers = [];
+            }
+
+            const q = num(qty, 1);
+            let tierAmt = 0;
+            for (let i = 0; i < tiers.length; i++) {
+            const min = num(tiers[i].min ?? tiers[i].min_qty, 0);
+            if (q >= min) {
+                const tv = num(tiers[i].val ?? tiers[i].value, 0);
+                tierAmt = (String(tiers[i].type).toLowerCase() === 'percent') ? (packBase * tv / 100) : tv;
+            } else break;
+            }
+
+            let packPrice = packBase - baseAmt - tierAmt;
+            if (packPrice < 0) packPrice = 0;
+            return { packPrice, mult };
+        }
+
+        function applyToRow($row){
+        if ($row.data('ud_applying')) return;
+        $row.data('ud_applying', true);
+        try {
+            const $opt = $row.find('select.sub_unit option:selected');
+
+        
+            if (!$opt.length) return;
+
+
+
+            const $qty = $row.find('input.pos_quantity, input[name^="products["][name$="[quantity]"]');
+            const qty  = num($qty.val(), 1) || 1;
+
+                const unitName = $opt.text().trim();
+        $qty.attr('data-unit', unitName).attr('data-unit_name', unitName);
+
+            const { packPrice, mult } = computePackPrice($opt, qty);
+            const baseExc = (mult ? packPrice / mult : packPrice);
+
+            // 1) set base price (per PCS) & multiplier (dipakai pos.js)
+            $row.find('input.hidden_base_unit_sell_price, input.base_unit_price, input[name^="products["][name$="[base_unit_price]"]').val(baseExc);
+            $row.find('input.base_unit_multiplier, input[name^="products["][name$="[base_unit_multiplier]"]').val(mult);
+
+            // 2) set harga jual (EXC & INC) — tanpa trigger('change')
+            $row.find('input[name^="products["][name$="[unit_price]"], \
+                    input[name^="products["][name$="[unit_price_before_discount]"], \
+                    input[name^="products["][name$="[default_sell_price]"], \
+                    input.pos_unit_price').val(packPrice);
+
+            $row.find('input[name^="products["][name$="[unit_price_inc_tax]"], \
+                    input[name^="products["][name$="[sell_price_inc_tax]"], \
+                    input.pos_unit_price_inc_tax').val(packPrice);
+
+            // 3) jangan utak-atik rule stok di sini (biarkan pos.js yang handle)
+
+            // 4) hitung ulang subtotal baris via fungsi bawaan
+            if (typeof pos_line_total === 'function') {
+            pos_line_total($row);
+            } else {
+            // fallback update tampilan subtotal kalau pos_line_total tidak ada
+            const lineTotal = packPrice * (num($qty.val(), 1) || 1);
+            $row.find('input.pos_line_total').val(lineTotal);
+            if (typeof __currency_trans_from_en === 'function') {
+                $row.find('.pos_line_total_text, .line_total_text').text(__currency_trans_from_en(lineTotal, true));
+            } else {
+                $row.find('.pos_line_total_text, .line_total_text').text(lineTotal);
+            }
+            }
+
+            // 5) ***PENTING***: panggil agregator TOTAL bawaan agar ".price_total" terupdate
+            if (typeof pos_total_row === 'function') {
+            pos_total_row();                 // UltimatePOS versi baru
+            } else if (typeof update_table_total === 'function') {
+            update_table_total();            // beberapa versi lain
+            } else if (typeof update_table_total_row === 'function') {
+            update_table_total_row();        // fallback versi lama
+            }
+
+        } finally {
+            $row.data('ud_applying', false);
+        }
+        }
+
+
+
+                // Trigger untuk ganti satuan
+                $(document).on('change', 'select.sub_unit, select[name$="[sub_unit_id]"], select[name*="[sub_unit"]', function () {
+                    applyToRow($(this).closest('tr'));
+                
+                });
+
+                // Trigger untuk Select2 (untuk elemen select)
+                $(document).on('select2:select', 'select.sub_unit, select[name$="[sub_unit_id]"], select[name*="[sub_unit"]', function () {
+                    applyToRow($(this).closest('tr'));
+                });
+
+                // Trigger untuk qty (diubah oleh user)
+                $(document).on('keyup change', 'input.pos_quantity, input[name^="products["][name$="[quantity]"]', function () {
+                    // applyToRow($(this).closest('tr'));
+                    var $row = $(this).closest('tr');
+
+      // hitung ulang harga & subtotal baris
+      applyToRow($row);
+
+      // perbarui template pesan stok supaya “undefined” diganti unit aktif
+      if (typeof rebuildQtyErrorMessages === 'function') {
+          rebuildQtyErrorMessages($row);
+      }
+                });
+
+                // Inisialisasi baris produk saat load
+                $(document).on('pos_product_row_loaded', function (e, $row) {
+                    applyToRow($row);
+                });
+
+                })(jQuery);
+
+
+    </script>
+
+
+    
+
     <script src="{{ asset('js/printer.js?v=' . $asset_v) }}"></script>
     <script src="{{ asset('js/product.js?v=' . $asset_v) }}"></script>
     <script src="{{ asset('js/opening_stock.js?v=' . $asset_v) }}"></script>

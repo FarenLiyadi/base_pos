@@ -133,6 +133,7 @@
 
 		@php
 			$max_quantity = $product->qty_available;
+			
 			$formatted_max_quantity = $product->formatted_qty_available;
 
 			if(!empty($action) && $action == 'edit') {
@@ -152,6 +153,7 @@
 			$max_qty_rule = $max_quantity;
 			$max_qty_msg = __('validation.custom-messages.quantity_not_available', ['qty'=> $formatted_max_quantity, 'unit' => $product->unit  ]);
 		@endphp
+
 
 		@if( session()->get('business.enable_lot_number') == 1 || session()->get('business.enable_product_expiry') == 1)
 		@php
@@ -189,7 +191,9 @@
 							$max_qty_rule = $lot_number->qty_available;
 							$max_qty_msg = __('lang_v1.quantity_error_msg_in_lot', ['qty'=> $lot_number->qty_formated, 'unit' => $product->unit  ]);
 						}
+						@dump($product->unit)
 					@endphp
+
 					<option value="{{$lot_number->purchase_line_id}}" data-qty_available="{{$lot_number->qty_available}}" data-msg-max="@lang('lang_v1.quantity_error_msg_in_lot', ['qty'=> $lot_number->qty_formated, 'unit' => $product->unit  ])" {{$selected}}>@if(!empty($lot_number->lot_number) && $lot_enabled == 1){{$lot_number->lot_number}} @endif @if($lot_enabled == 1 && $exp_enabled == 1) - @endif @if($exp_enabled == 1 && !empty($lot_number->exp_date)) @lang('product.exp_date'): {{@format_date($lot_number->exp_date)}} @endif {{$expiry_text}}</option>
 				@endforeach
 			</select>
@@ -230,6 +234,7 @@
 		@endphp
 		@foreach($sub_units as $key => $value)
         	@if(!empty($product->sub_unit_id) && $product->sub_unit_id == $key)
+			
         		@php
         			$max_qty_rule = $max_qty_rule / $multiplier;
         			$unit_name = $value['name'];
@@ -245,6 +250,7 @@
         		@endphp
         	@endif
         @endforeach
+		
 		<div class="input-group input-number">
 			<span class="input-group-btn"><button type="button" class="btn btn-default btn-flat quantity-down"><i class="fa fa-minus text-danger"></i></button></span>
 		<input type="text" data-min="1" style="width: auto"
@@ -270,13 +276,45 @@
 		<input type="hidden" name="products[{{$row_count}}][product_unit_id]" value="{{$product->unit_id}}">
 		@if(count($sub_units) > 0)
 			<br>
-			<select name="products[{{$row_count}}][sub_unit_id]" class="form-control input-sm sub_unit">
-                @foreach($sub_units as $key => $value)
-                    <option value="{{$key}}" data-multiplier="{{$value['multiplier']}}" data-unit_name="{{$value['name']}}" data-allow_decimal="{{$value['allow_decimal']}}" @if(!empty($product->sub_unit_id) && $product->sub_unit_id == $key) selected @endif>
-                        {{$value['name']}}
-                    </option>
-                @endforeach
-           </select>
+			<select name="products[{{ $row_count }}][sub_unit_id]" class="form-control sub_unit">
+@foreach($sub_units as $uid => $u)
+  @php
+    // multiplier yang benar dari UltimatePOS
+    $mult      = $u['multiplier'] ?? 1;
+
+    // harga base per PCS (EXC)
+    $basePrice = $product->default_sell_price ?? 0;
+
+    // ambil base discount & tiers dari variabel yang DIKIRIM controller
+    $baseDisc  = $unit_discount_map[$uid] ?? null;   // bentuknya: ['type'=>'fixed|percent','value'=>float] atau null
+    $tiers     = $unit_discount_tiers[$uid] ?? [];   // array tier: [['min'=>..., 'type'=>..., 'val'=>...], ...]
+
+    // fallback aman kalau null
+    $baseType  = $baseDisc['type']  ?? 'fixed';
+    $baseVal   = $baseDisc['value'] ?? 0;
+
+    // harga pack untuk qty saat ini (kalau controller kirim), fallback base*multiplier
+    $packPrice = $unit_price_map[$uid] ?? ($basePrice * $mult);
+  @endphp
+
+  <option
+    value="{{ $uid }}|{{ $mult }}"
+    data-multiplier="{{ $mult }}"
+    data-base-unit-price="{{ $basePrice }}"
+    data-base-disc-type="{{ $baseType }}"
+    data-base-disc-val="{{ $baseVal }}"
+    data-tiers='@json($tiers)'
+    data-price-exc="{{ $packPrice }}"
+	data-unit_name="{{ $u['actual_name'] ?? $u['name'] ?? $u['short_name'] ?? 'Unit' }}"
+  data-allow_decimal="{{ !empty($u['allow_decimal']) ? 1 : 0 }}"
+    @selected( (isset($product->sub_unit_id) ? $product->sub_unit_id : $product->unit_id) == $uid )
+  >
+    {{ $u['actual_name'] ?? $u['name'] ?? ('Unit #'.$uid) }}
+  </option>
+@endforeach
+
+</select>
+
 		@else
 			{{$product->unit}}
 		@endif
@@ -292,7 +330,7 @@
             required>
         @endif
 
-		<input type="hidden" class="base_unit_multiplier" name="products[{{$row_count}}][base_unit_multiplier]" value="{{$multiplier}}">
+		<input type="hidden" class="multiplier" name="products[{{$row_count}}][multiplier]" value="{{$multiplier}}">
 
 		<input type="hidden" class="hidden_base_unit_sell_price" value="{{$product->default_sell_price / $multiplier}}">
 		
